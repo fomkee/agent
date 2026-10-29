@@ -1,0 +1,123 @@
+name: verify-and-release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to build and release
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: agent-release-${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-22.04
+            asset: fomkee-agent-Linux-x86_64
+          - runner: ubuntu-22.04-arm
+            asset: fomkee-agent-Linux-arm64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
+      - run: cargo fmt --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - run: cargo test --locked --no-fail-fast
+      - run: cargo build --release --locked
+      - name: Verify tag and binary version
+        shell: bash
+        run: |
+          if [[ "$RELEASE_TAG" != v* ]]; then
+            echo "Release tag must start with v." >&2
+            exit 1
+          fi
+          actual_version="$(target/release/fomkee-agent --version)"
+          if [[ "$actual_version" != "fomkee-agent ${RELEASE_TAG#v}" ]]; then
+            echo "Tag and binary version do not match." >&2
+            exit 1
+          fi
+      - name: Package release archive
+        shell: bash
+        env:
+          RELEASE_ASSET: ${{ matrix.asset }}
+        run: |
+          package="package/$RELEASE_ASSET"
+          mkdir -p "$package/examples" "$package/packaging" dist
+          install -m 0755 target/release/fomkee-agent "$package/fomkee-agent"
+          install -m 0644 README.md CHANGELOG.md LICENSE "$package/"
+          install -m 0644 examples/config.toml examples/fomkee-health-check.js "$package/examples/"
+          install -m 0644 packaging/Caddyfile.example packaging/fomkee-agent.service "$package/packaging/"
+          tar --create --gzip --file "dist/$RELEASE_ASSET.tar.gz" -C package "$RELEASE_ASSET"
+          cd dist
+          sha256sum "$RELEASE_ASSET.tar.gz" > "$RELEASE_ASSET.tar.gz.sha256"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-${{ matrix.asset }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: verify
+    if: github.repository == 'fomkee/agent' && (startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ inputs.tag && format('refs/tags/{0}', inputs.tag) || github.ref }}
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: release-*
+          merge-multiple: true
+          path: dist
+      - name: Verify release assets and checksums
+        working-directory: dist
+        run: |
+          for asset in fomkee-agent-Linux-x86_64.tar.gz fomkee-agent-Linux-arm64.tar.gz; do
+            if [[ ! -s "$asset" || ! -s "$asset.sha256" ]]; then
+              echo "Missing release asset or checksum: $asset" >&2
+              exit 1
+            fi
+          done
+          cat ./*.sha256 > SHA256SUMS
+          sha256sum --check --strict SHA256SUMS
+          cp ../CHANGELOG.md .
+          sha256sum CHANGELOG.md > CHANGELOG.md.sha256
+      - name: Prepare versioned release notes
+        run: |
+          awk -v heading="## ${RELEASE_TAG#v}" '
+            $0 == heading { found = 1; print; next }
+            found && /^## / { exit }
+            found { print }
+            END { if (!found) exit 1 }
+          ' CHANGELOG.md > release-notes.md
+      - name: Publish immutable release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          options=(--verify-tag --title "$RELEASE_TAG" --notes-file release-notes.md)
+          if [[ "$RELEASE_TAG" == *-* ]]; then
+            options+=(--prerelease)
+          fi
+          gh release create "$RELEASE_TAG" dist/* "${options[@]}"

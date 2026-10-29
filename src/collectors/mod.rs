@@ -1,6 +1,7 @@
 pub mod backup;
 pub mod container;
 pub mod filesystem;
+mod filesystem_mounts;
 pub mod http_json;
 mod http_source;
 pub mod openmetrics;
@@ -41,19 +42,27 @@ fn build_collector(
     client: &Client,
 ) -> Result<Arc<dyn Collector>, CollectorError> {
     let collector: Arc<dyn Collector> = match config {
-        CollectorConfig::System { id } => Arc::new(system::SystemCollector::new(id.clone())),
-        CollectorConfig::Filesystem { id, path } => {
-            Arc::new(filesystem::FilesystemCollector::new(id.clone(), path))
-        }
-        CollectorConfig::Systemd { id, unit } => {
+        CollectorConfig::System { id, .. } => Arc::new(system::SystemCollector::new(id.clone())),
+        CollectorConfig::Filesystem {
+            id,
+            path,
+            mount_requirement,
+            ..
+        } => Arc::new(filesystem::FilesystemCollector::new(
+            id.clone(),
+            path,
+            *mount_requirement,
+        )),
+        CollectorConfig::Systemd { id, unit, .. } => {
             Arc::new(systemd::SystemdCollector::new(id.clone(), unit.clone()))
         }
-        CollectorConfig::Container { id, name } => {
+        CollectorConfig::Container { id, name, .. } => {
             Arc::new(container::ContainerCollector::new(id.clone(), name.clone()))
         }
         CollectorConfig::Postgres {
             id,
             database_url_env,
+            ..
         } => {
             let database_url = environment(database_url_env)?;
             Arc::new(postgres::PostgresCollector::new(id.clone(), &database_url)?)
@@ -62,6 +71,7 @@ fn build_collector(
             id,
             directory,
             prefix,
+            ..
         } => Arc::new(backup::BackupCollector::new(
             id.clone(),
             directory.clone(),
@@ -72,6 +82,7 @@ fn build_collector(
             url,
             auth,
             mappings,
+            ..
         } => Arc::new(http_json::HttpJsonCollector::new(
             id.clone(),
             url.clone(),
@@ -84,6 +95,7 @@ fn build_collector(
             url,
             auth,
             mappings,
+            ..
         } => Arc::new(openmetrics::OpenMetricsCollector::new(
             id.clone(),
             url.clone(),

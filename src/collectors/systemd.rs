@@ -30,7 +30,8 @@ impl Collector for SystemdCollector {
             .kill_on_drop(true)
             .arg("show")
             .arg("--no-pager")
-            .arg("--property=ActiveState,SubState,NRestarts")
+            .arg("--property=LoadState,ActiveState,SubState,NRestarts")
+            .arg("--")
             .arg(&self.unit);
         let output = command
             .output()
@@ -44,37 +45,47 @@ impl Collector for SystemdCollector {
         }
         let text = String::from_utf8(output.stdout)
             .map_err(|error| CollectorError::new("systemctl_output", error.to_string()))?;
-        let active = property(&text, "ActiveState")?;
-        let sub = property(&text, "SubState")?;
-        let restarts = property(&text, "NRestarts")?
-            .parse::<f64>()
-            .map_err(|error| CollectorError::new("systemctl_output", error.to_string()))?;
-        Ok(Collection::new(
-            vec![
-                Measurement::scalar(
-                    "restarts_total",
-                    MeasurementKind::Counter,
-                    Unit::Count,
-                    restarts,
-                )
-                .map_err(|error| CollectorError::new("invalid_measurement", error.to_string()))?,
-            ],
-            vec![
-                Fact {
-                    name: FactName::new("active").map_err(model_error)?,
-                    value: FactValue::Boolean(active == "active"),
-                },
-                Fact {
-                    name: FactName::new("active_state").map_err(model_error)?,
-                    value: FactValue::text(active).map_err(model_error)?,
-                },
-                Fact {
-                    name: FactName::new("sub_state").map_err(model_error)?,
-                    value: FactValue::text(sub).map_err(model_error)?,
-                },
-            ],
-        ))
+        parse_collection(&text)
     }
+}
+
+fn parse_collection(text: &str) -> Result<Collection, CollectorError> {
+    if property(text, "LoadState")? == "not-found" {
+        return Err(CollectorError::new(
+            "systemctl_not_found",
+            "configured systemd unit does not exist",
+        ));
+    }
+    let active = property(text, "ActiveState")?;
+    let sub = property(text, "SubState")?;
+    let restarts = property(text, "NRestarts")?
+        .parse::<f64>()
+        .map_err(|error| CollectorError::new("systemctl_output", error.to_string()))?;
+    Ok(Collection::new(
+        vec![
+            Measurement::scalar(
+                "restarts_total",
+                MeasurementKind::Counter,
+                Unit::Count,
+                restarts,
+            )
+            .map_err(|error| CollectorError::new("invalid_measurement", error.to_string()))?,
+        ],
+        vec![
+            Fact {
+                name: FactName::new("active").map_err(model_error)?,
+                value: FactValue::Boolean(active == "active"),
+            },
+            Fact {
+                name: FactName::new("active_state").map_err(model_error)?,
+                value: FactValue::text(active).map_err(model_error)?,
+            },
+            Fact {
+                name: FactName::new("sub_state").map_err(model_error)?,
+                value: FactValue::text(sub).map_err(model_error)?,
+            },
+        ],
+    ))
 }
 
 fn property<'a>(contents: &'a str, name: &str) -> Result<&'a str, CollectorError> {
@@ -89,4 +100,33 @@ fn property<'a>(contents: &'a str, name: &str) -> Result<&'a str, CollectorError
 
 fn model_error(error: impl std::fmt::Display) -> CollectorError {
     CollectorError::new("invalid_value", error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_missing_unit_is_failed_instead_of_collected() {
+        // Arrange
+        let output = "LoadState=not-found\nActiveState=inactive\nSubState=dead\nNRestarts=0\n";
+
+        // Act
+        let result = parse_collection(output);
+
+        // Assert
+        assert!(matches!(result, Err(error) if error.code() == "systemctl_not_found"));
+    }
+
+    #[test]
+    fn test_existing_inactive_unit_is_collected() {
+        // Arrange
+        let output = "LoadState=loaded\nActiveState=inactive\nSubState=dead\nNRestarts=0\n";
+
+        // Act
+        let result = parse_collection(output);
+
+        // Assert
+        assert!(result.is_ok());
+    }
 }

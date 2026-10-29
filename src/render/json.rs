@@ -14,6 +14,7 @@ pub struct CompactSnapshot<'a> {
 
 #[derive(Debug, Serialize)]
 pub struct CompactCollector<'a> {
+    pub interval_secs: u64,
     pub collected_at: chrono::DateTime<chrono::Utc>,
     pub duration_ms: u64,
     #[serde(flatten)]
@@ -77,6 +78,7 @@ pub fn compact(snapshot: &Snapshot) -> CompactSnapshot<'_> {
             (
                 observation.collector_id.as_str(),
                 CompactCollector {
+                    interval_secs: observation.interval.as_secs(),
                     collected_at: observation.collected_at,
                     duration_ms: observation.duration_ms,
                     state,
@@ -107,7 +109,9 @@ mod tests {
     use chrono::Utc;
 
     use super::*;
-    use crate::model::{CollectorId, Measurement, MeasurementKind, Observation, Unit};
+    use crate::model::{
+        CollectionInterval, CollectorId, Measurement, MeasurementKind, Observation, Unit,
+    };
 
     #[test]
     fn test_compact_json_omits_measurement_metadata() {
@@ -118,6 +122,7 @@ mod tests {
             generated_at: Utc::now(),
             observations: vec![Observation {
                 collector_id: CollectorId::new("disk").expect("valid fixture"),
+                interval: CollectionInterval::from_secs(60).expect("valid fixture"),
                 collected_at: Utc::now(),
                 duration_ms: 4,
                 result: ObservationResult::Collected {
@@ -135,6 +140,7 @@ mod tests {
 
         // Assert
         assert_eq!(value["collectors"]["disk"]["values"]["used_ratio"], 0.5);
+        assert_eq!(value["collectors"]["disk"]["interval_secs"], 60);
         assert!(value.to_string().find("kind").is_none());
     }
 }

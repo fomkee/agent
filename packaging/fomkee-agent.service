@@ -12,20 +12,30 @@ ExecStart=/usr/local/bin/fomkee-agent --config /etc/fomkee-agent/config.toml ser
 Restart=on-failure
 RestartSec=5s
 TimeoutStopSec=30s
+RuntimeDirectory=fomkee-agent
+RuntimeDirectoryMode=0750
 
 NoNewPrivileges=true
 PrivateTmp=true
 PrivateDevices=true
 ProtectSystem=strict
 ProtectHome=read-only
+ProtectClock=true
+ProtectHostname=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
+ProtectKernelLogs=true
 ProtectControlGroups=true
+RestrictNamespaces=true
 RestrictSUIDSGID=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
+CapabilityBoundingSet=
+AmbientCapabilities=
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 SystemCallArchitectures=native
+MemoryMax=128M
+TasksMax=64
 
 [Install]
 WantedBy=multi-user.target

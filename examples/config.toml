@@ -1,0 +1,82 @@
+# Adapt service names, paths, and source endpoints before running.
+# Secrets are read from the environment, never stored in this file.
+[server]
+listen = "127.0.0.1:9469"
+bearer_token_env = "FOMKEE_AGENT_TOKEN"
+metrics_enabled = true
+unix_socket = "/run/fomkee-agent/agent.sock"
+
+[schedule]
+interval_secs = 30
+collector_timeout_secs = 10
+max_concurrency = 4
+
+[tui]
+history_snapshots = 120
+default_view = "dashboard"
+
+[tui.capacity]
+warning_percent = 80
+critical_percent = 90
+
+[heartbeat]
+url_env = "FOMKEE_AGENT_HEARTBEAT_URL"
+
+[[collectors]]
+type = "system"
+id = "host"
+interval_secs = 10
+
+[[collectors]]
+type = "filesystem"
+id = "disk_root"
+path = "/"
+mount_requirement = "mountpoint"
+interval_secs = 120
+
+[[collectors]]
+type = "systemd"
+id = "fomkee_service"
+unit = "fomkee.service"
+interval_secs = 30
+
+[[collectors]]
+type = "container"
+id = "database_container"
+name = "postgres"
+interval_secs = 30
+
+[[collectors]]
+type = "postgres"
+id = "postgres"
+database_url_env = "FOMKEE_AGENT_DATABASE_URL"
+interval_secs = 60
+
+[[collectors]]
+type = "backup"
+id = "backups"
+directory = "/var/backups/fomkee"
+prefix = "fomkee-"
+interval_secs = 300
+
+[[collectors]]
+type = "http_json"
+id = "application"
+url = "http://127.0.0.1:8080/health-stats"
+interval_secs = 30
+mappings = [
+  { pointer = "/queue_depth", name = "queue_depth", kind = "gauge", unit = "count" },
+]
+
+[[collectors]]
+type = "openmetrics"
+id = "fomkee_queue"
+url = "http://127.0.0.1:8080/peer/metrics"
+interval_secs = 10
+auth = { type = "header", name = "x-fomkee-observability-token", value_env = "FOMKEE_AGENT_OBSERVABILITY_TOKEN" }
+mappings = [
+  { source = "fomkee_ingestion_outbox_dead_letters", name = "dead_letters", kind = "gauge", unit = "count" },
+  { source = "fomkee_ingestion_outbox_oldest_due_age_seconds", name = "oldest_due_age", kind = "gauge", unit = "seconds", required = false },
+  { source = "fomkee_ingestion_flush_failures_total", name = "flush_failures_total", kind = "counter", unit = "count" },
+  { source = "fomkee_ingestion_flush_entries_total", labels = { outcome = "acknowledged" }, name = "drained_total", kind = "counter", unit = "count" },
+]

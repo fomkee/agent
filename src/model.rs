@@ -24,6 +24,44 @@ pub enum ModelError {
     FactTextTooLong,
     #[error("collection duration is too large")]
     DurationTooLarge,
+    #[error("collection interval must be greater than zero")]
+    InvalidCollectionInterval,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(transparent)]
+/// Positive cadence assigned to one collector observation.
+pub struct CollectionInterval(u64);
+
+impl CollectionInterval {
+    /// Builds a collection interval from a positive number of seconds.
+    pub fn from_secs(seconds: u64) -> Result<Self, ModelError> {
+        if seconds == 0 {
+            Err(ModelError::InvalidCollectionInterval)
+        } else {
+            Ok(Self(seconds))
+        }
+    }
+
+    /// Returns the configured cadence in seconds.
+    pub fn as_secs(self) -> u64 {
+        self.0
+    }
+
+    /// Returns the configured cadence as a standard duration.
+    pub fn duration(self) -> Duration {
+        Duration::from_secs(self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for CollectionInterval {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let seconds = u64::deserialize(deserializer)?;
+        Self::from_secs(seconds).map_err(serde::de::Error::custom)
+    }
 }
 
 macro_rules! validated_name {
@@ -223,6 +261,8 @@ pub enum ObservationResult {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Observation {
     pub collector_id: CollectorId,
+    #[serde(rename = "interval_secs")]
+    pub interval: CollectionInterval,
     pub collected_at: DateTime<Utc>,
     pub duration_ms: u64,
     #[serde(flatten)]
@@ -292,5 +332,17 @@ mod tests {
 
         // Assert
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_collection_interval_rejects_zero() {
+        // Arrange
+        let seconds = 0;
+
+        // Act
+        let result = CollectionInterval::from_secs(seconds);
+
+        // Assert
+        assert_eq!(result, Err(ModelError::InvalidCollectionInterval));
     }
 }

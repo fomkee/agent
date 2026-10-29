@@ -72,11 +72,12 @@ mod tests {
     use chrono::Utc;
 
     use super::*;
-    use crate::model::Unit;
+    use crate::model::{CollectionInterval, Unit};
 
     fn observation(value: f64) -> Observation {
         Observation {
             collector_id: CollectorId::new("queue").expect("valid fixture"),
+            interval: CollectionInterval::from_secs(30).expect("valid fixture"),
             collected_at: Utc::now(),
             duration_ms: 1,
             result: ObservationResult::Collected {

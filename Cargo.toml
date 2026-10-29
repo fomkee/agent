@@ -4,10 +4,14 @@ resolver = "3"
 
 [package]
 name = "fomkee-agent"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 description = "Self-hosted system health collector for Fomkee and Prometheus"
+repository = "https://github.com/fomkee/agent"
+readme = "README.md"
+keywords = ["fomkee", "monitoring", "observability", "prometheus", "agent"]
+categories = ["command-line-utilities"]
 publish = false
 
 [[bin]]
@@ -20,7 +24,9 @@ async-trait = "0.1"
 axum = "0.8"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
+crossterm = { version = "0.28", features = ["event-stream"] }
 futures = "0.3"
+ratatui = "0.29"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 rustix = { version = "1", features = ["fs"] }
 serde = { version = "1", features = ["derive"] }
@@ -36,6 +42,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 url = { version = "2", features = ["serde"] }
 
 [dev-dependencies]
+tempfile = "3"
 tower = { version = "0.5", features = ["util"] }
 
 [lints.clippy]

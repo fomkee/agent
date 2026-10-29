@@ -1,0 +1,35 @@
+name: Bug report
+description: Report reproducible incorrect behavior in Fomkee Agent.
+title: "bug: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not include tokens, Heartbeat URLs, credentials, or customer data. Report security issues privately through the Security tab.
+  - type: input
+    id: version
+    attributes:
+      label: Agent version
+      placeholder: fomkee-agent 0.2.0
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Linux distribution and architecture
+      placeholder: Ubuntu 24.04, x86_64
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: What happened?
+      description: Include safe, redacted logs and the expected behavior.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Reproduction steps
+    validations:
+      required: true

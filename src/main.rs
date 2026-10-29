@@ -7,12 +7,15 @@ use chrono::Utc;
 use clap::{Parser, Subcommand};
 use fomkee_agent::{
     clock::{Clock, SystemClock},
+    collector::Collector,
     collectors::build_collectors,
-    config::Config,
+    config::{Config, ConfigError},
+    heartbeat, local_socket,
     model::Snapshot,
     render,
-    scheduler::{SchedulerSettings, collect_once, run_scheduler},
+    scheduler::{CollectorJob, SchedulerSettings, collect_once, run_scheduler},
     server::{HttpState, serve},
+    tui,
 };
 use tokio::{sync::watch, task::JoinSet};
 use tokio_util::sync::CancellationToken;
@@ -34,6 +37,7 @@ struct Cli {
 #[derive(Debug, Subcommand)]
 enum Command {
     Serve,
+    Tui,
     Snapshot {
         #[arg(long)]
         json: bool,
@@ -45,6 +49,8 @@ enum Command {
 enum CriticalTask {
     Scheduler(Result<(), anyhow::Error>),
     Server(Result<(), anyhow::Error>),
+    LocalSocket(Result<(), anyhow::Error>),
+    HeartbeatPublisher(Result<(), anyhow::Error>),
 }
 
 #[tokio::main]
@@ -52,9 +58,17 @@ async fn main() -> ExitCode {
     match run().await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("fomkee-agent: {error:#}");
+            eprintln!("fomkee-agent: {}", safe_diagnostic(&error));
             ExitCode::FAILURE
         }
+    }
+}
+
+fn safe_diagnostic(error: &anyhow::Error) -> String {
+    if let Some(config_error) = error.downcast_ref::<ConfigError>() {
+        format!("{config_error}")
+    } else {
+        format!("{error:#}")
     }
 }
 
@@ -71,13 +85,27 @@ async fn run() -> Result<()> {
         }
         Command::Snapshot { json } => snapshot(config, json).await,
         Command::Serve => daemon(config).await,
+        Command::Tui => run_tui(&config).await,
     }
+}
+
+async fn run_tui(config: &Config) -> Result<()> {
+    let max_snapshot_age = config
+        .shortest_collector_interval()
+        .context("derive shortest collector interval")?
+        .checked_mul(3)
+        .ok_or_else(|| anyhow!("schedule interval is too large"))?;
+    let settings = tui::TuiSettings::from_config(config).context("build TUI settings")?;
+    tui::run(&config.server.unix_socket, max_snapshot_age, settings)
+        .await
+        .context("run agent TUI")
 }
 
 async fn snapshot(config: Config, as_json: bool) -> Result<()> {
     let collectors = build_collectors(&config.collectors).context("build collectors")?;
+    let jobs = configure_jobs(collectors, &config.collectors, config.schedule.interval())?;
     let observations = collect_once(
-        collectors,
+        jobs,
         config.schedule.collector_timeout(),
         config.schedule.max_concurrency,
     )
@@ -103,18 +131,19 @@ async fn snapshot(config: Config, as_json: bool) -> Result<()> {
 
 async fn daemon(config: Config) -> Result<()> {
     let collectors = build_collectors(&config.collectors).context("build collectors")?;
+    let jobs = configure_jobs(collectors, &config.collectors, config.schedule.interval())?;
     let token = config.bearer_token().context("load HTTP bearer token")?;
     let cancellation = CancellationToken::new();
     let clock: Arc<dyn Clock> = Arc::new(SystemClock);
     let initial = Arc::new(Snapshot::empty(clock.now()));
     let (snapshot_sender, snapshot_receiver) = watch::channel(initial);
     let settings = SchedulerSettings {
-        interval: config.schedule.interval(),
         collector_timeout: config.schedule.collector_timeout(),
         max_concurrency: config.schedule.max_concurrency,
     };
-    let max_snapshot_age = settings
-        .interval
+    let max_snapshot_age = config
+        .shortest_collector_interval()
+        .context("derive shortest collector interval")?
         .checked_mul(3)
         .ok_or_else(|| anyhow!("schedule interval is too large"))?;
     let mut tasks = JoinSet::new();
@@ -123,7 +152,7 @@ async fn daemon(config: Config) -> Result<()> {
     tasks.spawn(async move {
         CriticalTask::Scheduler(
             run_scheduler(
-                collectors,
+                jobs,
                 settings,
                 snapshot_sender,
                 scheduler_cancellation,
@@ -134,6 +163,8 @@ async fn daemon(config: Config) -> Result<()> {
         )
     });
     let server_cancellation = cancellation.child_token();
+    let local_snapshot_receiver = snapshot_receiver.clone();
+    let heartbeat_snapshot_receiver = snapshot_receiver.clone();
     let server_state = HttpState::new(
         snapshot_receiver,
         token,
@@ -149,6 +180,38 @@ async fn daemon(config: Config) -> Result<()> {
                 .map_err(anyhow::Error::from),
         )
     });
+    let local_socket_cancellation = cancellation.child_token();
+    let unix_socket = config.server.unix_socket.clone();
+    tasks.spawn(async move {
+        CriticalTask::LocalSocket(
+            local_socket::serve(
+                unix_socket,
+                local_snapshot_receiver,
+                local_socket_cancellation,
+            )
+            .await
+            .map_err(anyhow::Error::from),
+        )
+    });
+    if let Some(endpoint) = config
+        .heartbeat_endpoint()
+        .context("load Fomkee heartbeat endpoint")?
+    {
+        let heartbeat_cancellation = cancellation.child_token();
+        tasks.spawn(async move {
+            CriticalTask::HeartbeatPublisher(
+                heartbeat::run(
+                    endpoint,
+                    heartbeat_snapshot_receiver,
+                    heartbeat_cancellation,
+                )
+                .await
+                .map_err(anyhow::Error::from),
+            )
+        });
+    } else if config.heartbeat.is_some() {
+        tracing::warn!("Fomkee heartbeat publishing is configured but its URL is not installed");
+    }
     tracing::info!(%listen, "fomkee agent started");
 
     let outcome = tokio::select! {
@@ -177,6 +240,26 @@ async fn daemon(config: Config) -> Result<()> {
     }
 }
 
+fn configure_jobs(
+    collectors: Vec<Arc<dyn Collector>>,
+    configs: &[fomkee_agent::config::CollectorConfig],
+    default_interval: std::time::Duration,
+) -> Result<Vec<CollectorJob>> {
+    if collectors.len() != configs.len() {
+        return Err(anyhow!("collector construction count mismatch"));
+    }
+    collectors
+        .into_iter()
+        .zip(configs)
+        .map(|(collector, config)| {
+            config
+                .interval(default_interval)
+                .map(|interval| CollectorJob::new(collector, interval))
+                .context("derive collector interval")
+        })
+        .collect()
+}
+
 fn inspect_join(
     joined: Result<CriticalTask, tokio::task::JoinError>,
     unexpected_exit: bool,
@@ -189,12 +272,29 @@ fn inspect_join(
         Ok(CriticalTask::Server(Ok(()))) if unexpected_exit => {
             failures.push("HTTP server exited unexpectedly".to_owned());
         }
-        Ok(CriticalTask::Scheduler(Ok(())) | CriticalTask::Server(Ok(()))) => {}
+        Ok(CriticalTask::LocalSocket(Ok(()))) if unexpected_exit => {
+            failures.push("local snapshot server exited unexpectedly".to_owned());
+        }
+        Ok(CriticalTask::HeartbeatPublisher(Ok(()))) if unexpected_exit => {
+            failures.push("heartbeat publisher exited unexpectedly".to_owned());
+        }
+        Ok(
+            CriticalTask::Scheduler(Ok(()))
+            | CriticalTask::Server(Ok(()))
+            | CriticalTask::LocalSocket(Ok(()))
+            | CriticalTask::HeartbeatPublisher(Ok(())),
+        ) => {}
         Ok(CriticalTask::Scheduler(Err(error))) => {
             failures.push(format!("scheduler failed: {error:#}"));
         }
         Ok(CriticalTask::Server(Err(error))) => {
             failures.push(format!("HTTP server failed: {error:#}"));
+        }
+        Ok(CriticalTask::LocalSocket(Err(error))) => {
+            failures.push(format!("local snapshot server failed: {error:#}"));
+        }
+        Ok(CriticalTask::HeartbeatPublisher(Err(error))) => {
+            failures.push(format!("heartbeat publisher failed: {error:#}"));
         }
         Err(error) => failures.push(format!("critical task join failed: {error}")),
     }
@@ -234,4 +334,24 @@ fn init_tracing() -> Result<()> {
             .map_err(|error| anyhow!("initialize tracing: {error}"))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_configuration_diagnostic_does_not_expose_source_text() {
+        // Arrange
+        let source = toml::from_str::<Config>("secret = \"CONFIG_PRIVATE_MARKER\"")
+            .expect_err("fixture must be invalid configuration");
+        let error = anyhow::Error::new(ConfigError::Parse(source)).context("load configuration");
+
+        // Act
+        let diagnostic = safe_diagnostic(&error);
+
+        // Assert
+        assert_eq!(diagnostic, "failed to parse agent configuration");
+    }
 }
